@@ -8,6 +8,7 @@ prose -- interpretation belongs to the skill instructions, not to the script.
 import gzip
 import io
 import json
+import os
 import re
 import ssl
 import time
@@ -16,6 +17,107 @@ import urllib.parse
 import urllib.request
 import urllib.robotparser
 from html.parser import HTMLParser
+
+# --- TLS trust store -------------------------------------------------------
+# Python does not always ship a usable CA bundle. A python.org macOS install
+# whose "Install Certificates.command" was never run resolves openssl_cafile to
+# a path that does not exist, so EVERY https fetch dies with
+# CERTIFICATE_VERIFY_FAILED. That is a fact about this machine, not about the
+# audited site -- and reporting it as "the homepage is down" is the worst
+# failure this tool can have. So: find a real bundle. Verification is never
+# disabled; an unverified context would make the audit trivially MITM-able.
+_CA_CANDIDATES = (
+    "/etc/ssl/cert.pem",                     # macOS system bundle
+    "/etc/ssl/certs/ca-certificates.crt",    # Debian, Ubuntu, Alpine
+    "/etc/pki/tls/certs/ca-bundle.crt",      # RHEL, Fedora, Amazon Linux
+    "/etc/ssl/ca-bundle.pem",                # openSUSE
+    "/usr/local/etc/openssl/cert.pem",       # Homebrew OpenSSL
+)
+
+_SSL_CTX = None
+_SSL_SOURCE = None
+
+
+def ssl_context():
+    """An SSL context with a working trust store. Verification stays ON."""
+    global _SSL_CTX, _SSL_SOURCE
+    if _SSL_CTX is not None:
+        return _SSL_CTX
+    ctx = ssl.create_default_context()
+    if ctx.get_ca_certs():
+        _SSL_CTX, _SSL_SOURCE = ctx, "system default"
+        return _SSL_CTX
+    paths = []
+    try:
+        import certifi
+        paths.append(certifi.where())
+    except Exception:
+        pass
+    paths.extend(_CA_CANDIDATES)
+    for p in paths:
+        try:
+            if p and os.path.exists(p):
+                cand = ssl.create_default_context(cafile=p)
+                if cand.get_ca_certs():
+                    _SSL_CTX, _SSL_SOURCE = cand, p
+                    return _SSL_CTX
+        except Exception:
+            continue
+    _SSL_CTX, _SSL_SOURCE = ctx, "EMPTY -- no CA bundle found on this machine"
+    return _SSL_CTX
+
+
+def tls_trust_source():
+    """Where the trust store came from. Recorded in every probe's output."""
+    ssl_context()
+    return _SSL_SOURCE
+
+
+# Who is responsible for a transport error -- the audited site, or this machine?
+# Absence of evidence is only evidence of absence when the transport worked, so
+# nothing may be inferred about a site until this returns "site".
+_ENV_ERROR_SIGNS = (
+    "unable to get local issuer certificate",
+    "network is unreachable",
+    "no route to host",
+    "temporary failure in name resolution",
+    "proxy",
+)
+_SITE_ERROR_SIGNS = (
+    "certificate has expired",
+    "hostname mismatch",
+    "self-signed certificate",
+    "self signed certificate",
+    "nodename nor servname provided",
+    "name or service not known",
+    "connection refused",
+    "connection reset",
+    "timed out",
+    "timeout",
+    "wrong version number",
+)
+
+
+def classify_transport_error(err):
+    """('environment'|'site'|'unknown', why). Never guess at the site's expense."""
+    if not err:
+        return (None, None)
+    e = str(err).lower()
+    if "certificate" in e and str(tls_trust_source()).startswith("EMPTY"):
+        return ("environment",
+                "This machine has no CA bundle, so every TLS verification fails "
+                "regardless of the site. Nothing can be concluded about the site.")
+    for s in _ENV_ERROR_SIGNS:
+        if s in e:
+            return ("environment",
+                    "This is a property of the machine running the audit -- its "
+                    "trust store, proxy or connectivity -- not of the audited site.")
+    for s in _SITE_ERROR_SIGNS:
+        if s in e:
+            return ("site",
+                    "This is a property of the audited site's DNS, TLS or origin.")
+    return ("unknown",
+            "This error could not be attributed to the site or to the local machine.")
 
 # --- User agents -----------------------------------------------------------
 # Two families matter and they are NOT interchangeable:
@@ -81,7 +183,7 @@ def fetch(url, ua="browser", timeout=DEFAULT_TIMEOUT, max_bytes=3_000_000, metho
     })
     out = {"url": url, "ua": ua, "ua_string": ua_string, "status": None, "final_url": url,
            "headers": {}, "body": "", "bytes": 0, "elapsed_ms": None, "error": None}
-    ctx = ssl.create_default_context()
+    ctx = ssl_context()
     started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
@@ -100,6 +202,7 @@ def fetch(url, ua="browser", timeout=DEFAULT_TIMEOUT, max_bytes=3_000_000, metho
         out["headers"] = {k.lower(): v for k, v in (e.headers or {}).items()}
     except Exception as e:  # DNS, TLS, timeout, connection reset
         out["error"] = f"{type(e).__name__}: {e}"
+        out["error_class"], out["error_attribution"] = classify_transport_error(out["error"])
         out["elapsed_ms"] = int((time.monotonic() - started) * 1000)
         return out
 

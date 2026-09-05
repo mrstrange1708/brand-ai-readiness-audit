@@ -141,13 +141,16 @@ def main():
     ev = {"site": urllib.parse.urlsplit(base).netloc,
           "base_url": base,
           "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-          "probe": "crawl_probe"}
+          "probe": "crawl_probe",
+          "tls_trust_source": A.tls_trust_source()}
 
     # -- homepage / transport ------------------------------------------------
     home = A.fetch(base)
     ev["homepage"] = {"status": home["status"], "final_url": home["final_url"],
                       "bytes": home["bytes"], "elapsed_ms": home["elapsed_ms"],
                       "error": home["error"],
+                      "error_class": home.get("error_class"),
+                      "error_attribution": home.get("error_attribution"),
                       "https": home["final_url"].startswith("https://"),
                       "redirected": home["final_url"].rstrip("/") != base.rstrip("/"),
                       "x_robots_tag": home["headers"].get("x-robots-tag"),

@@ -552,10 +552,14 @@ def build_rules():
         s = ev.get("entity", {}).get("summary", {})
         if s.get("name_variant_count", 0) < 2:
             return None
-        variants = s.get("name_variants") or {}
+        # Quote only what the site DECLARES about itself. Page titles are not
+        # brand declarations and are deliberately excluded from this claim.
+        declared = s.get("declared_names") or []
+        variants = {k: v for k, v in (s.get("name_variants") or {}).items()
+                    if k in ("jsonld", "og_site_name")}
         pretty = "; ".join(f"{k}: {', '.join(v)}" for k, v in variants.items())
-        return {"evidence": f"{s['name_variant_count']} distinct brand-name strings observed -- "
-                            f"{pretty}.",
+        return {"evidence": f"{s['name_variant_count']} distinct brand names are declared by the "
+                            f"site itself ({', '.join(declared)}) -- {pretty}.",
                 "where": s.get("pages_with_jsonld", [])[:5],
                 # Two names may be one sloppy entity or two real ones. The evidence is
                 # solid; the diagnosis needs a human. Say so rather than over-claim.
@@ -770,7 +774,100 @@ def build_rules():
     return R
 
 
+# --------------------------------------------------------------------------
+# THE TRANSPORT GATE.
+# "Absence of evidence is not evidence of absence" is only enforceable if the
+# code knows whether the transport worked. A fetch that never completed leaves
+# status=None and count=0 -- values indistinguishable from a site that really
+# has no sitemap. Reporting those as defects invents findings about a site
+# nobody successfully connected to, which is the worst error an audit can make.
+# So: no HTTP response, no inference.
+# --------------------------------------------------------------------------
+# Findings that remain defensible when the site root never returned a status.
+_REACHABILITY_RULES = {"F-ACC-008", "F-ACC-009"}
+
+
+def transport_state(ev):
+    """Did we actually reach the site, and if not, whose fault is it?"""
+    crawl = ev.get("crawl") or {}
+    hp = crawl.get("homepage") or {}
+    err = hp.get("error")
+    if not err and hp.get("status") is not None:
+        return {"ok": True, "class": None, "error": None, "why": None,
+                "trust_store": crawl.get("tls_trust_source")}
+    klass = hp.get("error_class") or "unknown"
+    return {"ok": False, "class": klass, "error": err or "no HTTP status recorded",
+            "why": hp.get("error_attribution"),
+            "trust_store": crawl.get("tls_trust_source")}
+
+
+def _inconclusive(site, entry, ts, ev):
+    """The audit could not run. Say so; conclude nothing about the site."""
+    env = ts["class"] == "environment"
+    finding = {
+        "id": "F-ENV-001",
+        "title": ("Audit could not connect from this machine; no conclusions drawn"
+                  if env else "Audit could not reach the site; cause unattributed"),
+        "severity": "info",
+        "funnel_stage": "accessible",
+        "confidence": "high",
+        "evidence": (f"GET {entry} failed with {ts['error']}. "
+                     f"{ts['why'] or ''} TLS trust store in use: {ts['trust_store'] or 'unknown'}. "
+                     f"No page was retrieved, so no finding about this site's content, "
+                     f"markup or configuration can be supported by evidence."),
+        "where": [entry],
+        "suggested_action": {
+            "summary": ("Fix connectivity on the auditing machine, then re-run. This is not a "
+                        "defect in the audited site." if env else
+                        "Re-run from a network that can reach the site before drawing conclusions."),
+            "how": ([
+                "If the error mentions a certificate: this Python has no usable CA bundle. "
+                "On macOS run the 'Install Certificates.command' in /Applications/Python 3.x/, "
+                "or `pip install certifi`.",
+                "If it mentions a proxy or unreachable network: the audit host has no route out.",
+                "Re-run the audit once `curl -sI <site>` succeeds from the same shell.",
+            ] if env else [
+                "Confirm the domain resolves and the origin answers: `curl -sI <site>`.",
+                "Re-run from a different network to rule out local filtering.",
+                "If the failure is a real DNS or TLS fault at the site, that is itself the "
+                "critical finding -- it makes the site invisible to every crawler.",
+            ]),
+            "priority": "info",
+            "verify": "Re-run crawl_probe.py; homepage.status must be a real HTTP status.",
+        },
+    }
+    return {
+        "site": site,
+        "audited_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "entry_url": entry,
+        "audit_version": "1.1.0",
+        "audit_valid": False,
+        "summary": {
+            "total_findings": 1, "critical": 0, "high": 0, "medium": 0, "low": 0, "info": 1,
+            "blocking_finding": "F-ENV-001",
+            "stages_broken": [],
+            "note": "Inconclusive audit: the site was never retrieved.",
+        },
+        "findings": [finding],
+        "proactive_recommendations": [],
+        "measurement_plan": {},
+        "coverage": {
+            "probes_run": sorted(k for k in ev if ev.get(k)),
+            "rules_evaluated": 0,
+            "rejected_by_evidence_gate": [],
+            "transport": ts,
+            "suppressed_by_transport_gate": "all content rules",
+        },
+    }
+
+
 def compose(ev, site, entry):
+    ts = transport_state(ev)
+    # Nothing was retrieved and the cause is this machine (or unknown): the only
+    # honest output is "inconclusive". Never convert that into site defects.
+    if not ts["ok"] and ts["class"] in ("environment", "unknown"):
+        return _inconclusive(site, entry, ts, ev)
+
     findings, gate_rejects = [], []
     for r in build_rules():
         try:
@@ -779,6 +876,15 @@ def compose(ev, site, entry):
             gate_rejects.append({"id": r["id"], "reason": f"rule error: {type(e).__name__}: {e}"})
             continue
         if not hit:
+            continue
+        # --- THE TRANSPORT GATE -----------------------------------------
+        # The root never answered, and the failure is the site's own. Only
+        # reachability findings survive: every other rule would be reading
+        # meaning into counts produced by fetches that never completed.
+        if not ts["ok"] and r["id"] not in _REACHABILITY_RULES:
+            gate_rejects.append({"id": r["id"],
+                                 "reason": "suppressed: site returned no HTTP status, "
+                                           "so absence could not be distinguished from failure"})
             continue
         # --- THE EVIDENCE GATE ------------------------------------------
         if not hit.get("evidence") or len(str(hit["evidence"]).strip()) < 20:
@@ -833,6 +939,7 @@ def compose(ev, site, entry):
             "probes_run": sorted(k for k in ev if ev.get(k)),
             "rules_evaluated": len(build_rules()),
             "rejected_by_evidence_gate": gate_rejects,
+            "transport": ts,
         },
     }
 
