@@ -143,6 +143,11 @@ def robots_allows(robots_text, ua_token, url):
 # --- HTML -------------------------------------------------------------------
 _DROP_TAGS = {"script", "style", "noscript", "template", "svg", "iframe"}
 
+# HTML void elements never emit an end tag, so a naive stack-based collector
+# would hold them open forever and silently drop every <meta>/<link>/<img>.
+_VOID_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input",
+              "link", "meta", "param", "source", "track", "wbr"}
+
 
 class _Text(HTMLParser):
     def __init__(self):
@@ -184,7 +189,11 @@ class _Tags(HTMLParser):
         self._stack = []
 
     def handle_starttag(self, tag, attrs):
-        if tag in self.wanted:
+        if tag not in self.wanted:
+            return
+        if tag in _VOID_TAGS:
+            self.found.append({"tag": tag, "attrs": dict(attrs), "text": ""})
+        else:
             self._stack.append({"tag": tag, "attrs": dict(attrs), "text": []})
 
     def handle_startendtag(self, tag, attrs):
@@ -299,6 +308,13 @@ def _demo():
     assert norm_base("http://x.example/deep/path?q=1") == "http://x.example/"
     h1 = [t for t in tags(html, ["h1"])]
     assert h1 and h1[0]["text"] == "Real Heading", h1
+    # regression: void elements must be collected even though they never close
+    void_html = ('<head><meta name="description" content="d"><link rel="canonical" href="/c">'
+                 '</head><body><img src="a.png"><img src="b.png" alt="b"></body>')
+    got = tags(void_html, ["meta", "link", "img"])
+    assert [g["tag"] for g in got] == ["meta", "link", "img", "img"], got
+    assert got[0]["attrs"]["content"] == "d" and got[1]["attrs"]["href"] == "/c", got
+    assert sum(1 for g in got if g["tag"] == "img" and not g["attrs"].get("alt")) == 1, got
     assert set(CITATION_BOTS) >= {"OAI-SearchBot", "Claude-SearchBot", "PerplexityBot"}
     assert "GPTBot" in TRAINING_BOTS and "GPTBot" not in CITATION_BOTS
     print("auditlib self-check OK")

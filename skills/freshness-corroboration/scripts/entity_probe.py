@@ -47,8 +47,9 @@ AUTHORITY_HOSTS = ("wikidata.org", "wikipedia.org", "crunchbase.com", "linkedin.
                    "github.com", "bloomberg.com", "sec.gov", "opencorporates.com",
                    "g2.com", "trustpilot.com", "glassdoor.com", "producthunt.com")
 DATE_RE = re.compile(
-    r"\b(20\d{2}-\d{2}-\d{2}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+20\d{2}"
-    r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+20\d{2})\b", re.I)
+    r"\b(20\d{2}-\d{2}-\d{2}"
+    r"|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+20\d{2}"
+    r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+20\d{2})\b", re.I)
 COPYRIGHT_RE = re.compile(r"(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-–—]\s*)?(\d{4})", re.I)
 
 
@@ -86,7 +87,11 @@ def scan_page(url):
     if meta.get("og:site_name"):
         names["og_site_name"] = meta["og:site_name"].strip()
     if titles:
-        names["title_tail"] = re.split(r"\s[|\-–—]\s", titles[0])[-1].strip()
+        parts = re.split(r"\s[|\-–—]\s", titles[0])
+        # No delimiter means the title is a sentence, not "Page | Brand".
+        # Treating the whole sentence as a brand name invents false variants.
+        if len(parts) > 1 and parts[-1].strip():
+            names["title_tail"] = parts[-1].strip()
     cm = COPYRIGHT_RE.search(text)
     if cm:
         names["copyright_year"] = cm.group(1)
@@ -130,14 +135,32 @@ def scan_page(url):
     return rec
 
 
+# Many high-value registries (Bloomberg, Crunchbase, LinkedIn) refuse automated
+# clients outright. A 403/429/999 says "we block bots", NOT "this page is missing".
+# Reporting those as broken links is the classic corroboration false positive.
+BOT_BLOCK_STATUSES = {401, 403, 405, 406, 429, 451, 503, 999}
+DEAD_STATUSES = {404, 410}
+
+
 def check_sameas(urls, limit=6):
-    """Corroboration is only real if the off-site page actually exists."""
+    """Classify each declared sameAs target: resolves, dead, or unverifiable."""
     out = []
     for u in list(urls)[:limit]:
         r = A.fetch(u, ua="browser")
+        st = r["status"]
+        if r["error"]:
+            verdict = "unreachable"
+        elif st in DEAD_STATUSES:
+            verdict = "dead"
+        elif st in BOT_BLOCK_STATUSES:
+            verdict = "unverifiable"      # target blocks automated checks
+        elif st and 200 <= st < 400:
+            verdict = "resolves"
+        else:
+            verdict = "unverifiable"
         out.append({"url": u, "host": urllib.parse.urlsplit(u).netloc,
-                    "status": r["status"], "error": r["error"],
-                    "resolves": r["status"] == 200 and not r["error"]})
+                    "status": st, "error": r["error"], "verdict": verdict,
+                    "resolves": verdict == "resolves"})
     return out
 
 
@@ -189,7 +212,11 @@ def summarise(pages, sameas_results, this_year):
         "authority_links_found": auth,
         "authority_link_count": len(auth),
         "same_as_check": sameas_results,
-        "same_as_broken": [s["url"] for s in sameas_results if not s["resolves"]],
+        # only genuinely dead or unreachable targets are "broken"
+        "same_as_broken": [s["url"] for s in sameas_results
+                           if s.get("verdict") in ("dead", "unreachable")],
+        "same_as_unverifiable": [s["url"] for s in sameas_results
+                                 if s.get("verdict") == "unverifiable"],
         "pages_with_no_date_signal": [p["url"] for p in ok
                                       if not p["dates"]["jsonld_modified"]
                                       and not p["dates"]["jsonld_published"]
@@ -262,16 +289,29 @@ def _demo():
          "dates": {"jsonld_published": [], "jsonld_modified": [], "http_last_modified": None,
                    "visible_date_count": 0, "visible_date_sample": [], "copyright_year": None}},
     ]
-    s = summarise(pages, [{"url": "https://wikidata.org/wiki/Q1", "resolves": False, "status": 404}], 2026)
+    checks = check_sameas.__wrapped__ if False else [
+        {"url": "https://wikidata.org/wiki/Q1", "resolves": False, "status": 404, "verdict": "dead"},
+        {"url": "https://www.crunchbase.com/o/x", "resolves": False, "status": 403,
+         "verdict": "unverifiable"},
+    ]
+    s = summarise(pages, checks, 2026)
     assert s["jsonld_coverage_ratio"] == 0.5, s
     assert s["pages_without_jsonld"] == ["u2"], s
     assert s["incomplete_types"] == ["Organization"], s
     assert s["name_variant_count"] == 2, s          # "Acme Corp" vs "Acme" -> ambiguity signal
     assert s["stale_copyright"] == [2019], s
+    # a 404 is broken; a 403 from a bot-blocking registry is NOT
     assert s["same_as_broken"] == ["https://wikidata.org/wiki/Q1"], s
+    assert s["same_as_unverifiable"] == ["https://www.crunchbase.com/o/x"], s
     assert s["date_contradictions"] and s["date_contradictions"][0]["url"] == "u1", s
     assert s["pages_with_no_date_signal"] == ["u2"], s
     assert year_of("Mon, 01 Jan 2019 00:00:00 GMT") == 2019
+
+    # regression: "Aug. 15, 2026" and "15 Aug. 2026" are dates
+    for good in ("Aug. 15, 2026", "August 15, 2026", "2026-08-15", "15 Aug. 2026"):
+        assert DATE_RE.search(good), good
+    # regression: an undelimited title must NOT become a brand-name variant
+    assert COPYRIGHT_RE.search("Copyright \u00a92001-2026").group(1) == "2026"
     print("entity_probe self-check OK")
 
 

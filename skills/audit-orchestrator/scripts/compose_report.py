@@ -497,7 +497,9 @@ def build_rules():
     @rule("F-ENT-006", "Declared sameAs targets do not resolve", "corroborated", "medium",
           "Fix or remove the broken sameAs URLs.",
           ["A sameAs to a 404 is worse than no sameAs: it asserts a corroboration that does not exist.",
-           "Re-check these whenever a social handle or profile URL changes."],
+           "Re-check these whenever a social handle or profile URL changes.",
+           "Targets that answer 403/429 to automated clients (Bloomberg, Crunchbase, LinkedIn) are "
+           "reported separately as unverifiable, not broken -- do not remove those."],
           "entity_probe.py: same_as_broken is empty.",
           "entity")
     def _(ev):
@@ -507,9 +509,12 @@ def build_rules():
             return None
         checked = s.get("same_as_check") or []
         detail = "; ".join(f"{c['url']} -> HTTP {c['status']}" for c in checked
-                           if not c.get("resolves"))[:400]
-        return {"evidence": f"{len(broken)}/{len(checked)} declared sameAs targets did not return "
-                            f"HTTP 200: {detail}", "where": broken}
+                           if c.get("verdict") in ("dead", "unreachable"))[:400]
+        unver = s.get("same_as_unverifiable") or []
+        tail = (f" A further {len(unver)} target(s) block automated checks and were not "
+                f"counted as broken.") if unver else ""
+        return {"evidence": f"{len(broken)}/{len(checked)} declared sameAs targets are dead or "
+                            f"unreachable: {detail}{tail}", "where": broken}
 
     @rule("F-ENT-007", "Key schema types are missing the properties that make them quotable",
           "extractable", "medium",
@@ -533,10 +538,14 @@ def build_rules():
           "Pick one canonical brand string and use it everywhere, on-site and off.",
           ["Machines treat 'Acme', 'Acme Corp' and 'ACME Technologies' as candidate-different "
            "entities until something proves otherwise.",
-           "Set the canonical form in Organization.name, then use `alternateName` for the variants "
-           "you cannot retire.",
-           "Push the same string to every off-site profile -- consistency across independent sources "
-           "is what turns a claim into a believed fact."],
+           "First decide which case this is. If the variants are one entity written loosely, set the "
+           "canonical form in Organization.name and list the rest as `alternateName`.",
+           "If they are genuinely two entities -- a foundation and the site it runs, say -- do not "
+           "collapse them: declare both with distinct @id values and link them with "
+           "`parentOrganization`/`subOrganization`. Ambiguity comes from the relationship being "
+           "unstated, not from having two names.",
+           "Then push the same strings to every off-site profile -- consistency across independent "
+           "sources is what turns a claim into a believed fact."],
           "entity_probe.py: name_variant_count == 1.",
           "entity")
     def _(ev):
@@ -547,7 +556,10 @@ def build_rules():
         pretty = "; ".join(f"{k}: {', '.join(v)}" for k, v in variants.items())
         return {"evidence": f"{s['name_variant_count']} distinct brand-name strings observed -- "
                             f"{pretty}.",
-                "where": s.get("pages_with_jsonld", [])[:5]}
+                "where": s.get("pages_with_jsonld", [])[:5],
+                # Two names may be one sloppy entity or two real ones. The evidence is
+                # solid; the diagnosis needs a human. Say so rather than over-claim.
+                "confidence": "medium" if s["name_variant_count"] == 2 else "high"}
 
     @rule("F-ENT-009", "Pages carry no date signal at all", "corroborated", "high",
           "Publish and maintain machine-readable dates.",

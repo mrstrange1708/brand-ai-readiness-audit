@@ -29,7 +29,7 @@ FRAMEWORK_HINTS = [
     ("nuxt", r"/_nuxt/|__NUXT__"),
     ("react", r"react(-dom)?[.@\-][\d.]*(production|development)?\.?m?in?\.js|data-reactroot"),
     ("vue", r"vue[.@\-][\d.]*(runtime|esm)?.*\.js|data-v-[0-9a-f]{8}"),
-    ("angular", r"ng-version|/polyfills[.-][0-9a-z]+\.js"),
+    ("angular", r"ng-version=|<app-root|\bng-app\b"),
     ("gatsby", r"gatsby|___gatsby"),
     ("svelte", r"svelte-[0-9a-z]{6}"),
 ]
@@ -38,7 +38,34 @@ SOCIAL = ("facebook.", "twitter.", "x.com", "instagram.", "linkedin.", "youtube.
           "pinterest.", "t.co", "threads.")
 # Page kinds where a missing hard fact (price, spec) is materially different from
 # a missing fact on, say, an About page.
-FACT_PATHS = ("product", "pricing", "price", "plan", "shop", "buy", "store", "item", "sku")
+FACT_PATH_SEGMENTS = {"product", "products", "pricing", "price", "prices", "plan", "plans",
+                      "shop", "store", "buy", "checkout", "subscription", "subscriptions"}
+COMMERCE_TEXT = re.compile(
+    r"\b(add to (?:cart|bag|basket)|buy now|checkout|per month|per year|/mo\b|/yr\b|"
+    r"free trial|subscribe|in stock|out of stock|order now|starting at|from \$)", re.I)
+SHELL_WORD_LIMIT = 200
+DECORATIVE_SRC = re.compile(r"(spacer|blank|pixel|1x1|transparent|dot)\.(gif|png|svg)$", re.I)
+
+
+def is_decorative(attrs):
+    """Spacer gifs, tracking pixels and role=presentation images carry no fact, so a
+    missing alt on them is correct HTML rather than a defect."""
+    if attrs.get("role") == "presentation" or attrs.get("aria-hidden") == "true":
+        return True
+    if DECORATIVE_SRC.search(attrs.get("src", "")):
+        return True
+    for dim in ("width", "height"):
+        v = attrs.get(dim, "")
+        if v.isdigit() and int(v) <= 2:
+            return True
+    return False
+
+
+def looks_like_fact_page(url, text):
+    """Path segment AND commerce language. Either alone is too loose: news sites use
+    /item, and blogs discuss pricing."""
+    segs = {s for s in urllib.parse.urlsplit(url).path.lower().split("/") if s}
+    return bool(segs & FACT_PATH_SEGMENTS) and bool(COMMERCE_TEXT.search(text))
 
 
 def analyse(url):
@@ -47,7 +74,14 @@ def analyse(url):
            "bytes": r["bytes"], "elapsed_ms": r["elapsed_ms"], "error": r["error"]}
     if r["status"] != 200 or not r["body"]:
         return rec
-    html = r["body"]
+    rec.update(analyse_html(url, r["body"]))
+    return rec
+
+
+def analyse_html(url, html):
+    """Pure: HTML in, signals out. Split from analyse() so the render-gap logic can
+    be tested without the network."""
+    rec = {}
     text = A.visible_text(html)
     words = len(text.split())
 
@@ -70,13 +104,19 @@ def analyse(url):
     # --- JS-render gap signals ------------------------------------------
     spa_roots = [d["attrs"].get("id") for d in by.get("div", [])
                  if d["attrs"].get("id", "").lower() in SPA_ROOT_IDS and len(d["text"].strip()) < 40]
+    # A mount element is only evidence of a render gap when the PAGE is also thin.
+    # stripe.com ships <div id="__next"> with ~1900 server-rendered words; that is
+    # not a shell. Without this gate every Next.js/Nuxt site is a false positive.
+    spa_shell = bool(spa_roots) and words < SHELL_WORD_LIMIT
     frameworks = [n for n, pat in FRAMEWORK_HINTS if re.search(pat, html, re.I)]
     noscript_text = " ".join(A.visible_text(n["text"]) for n in by.get("noscript", []))
     rec["render"] = {
         "visible_words": words,
         "html_bytes": len(html),
         "text_to_html_ratio": round(len(text) / max(len(html), 1), 4),
-        "empty_spa_root_ids": [i for i in spa_roots if i],
+        "empty_spa_root_ids": [i for i in spa_roots if i] if spa_shell else [],
+        "mount_elements_seen": [i for i in spa_roots if i],
+        "spa_shell_suspected": spa_shell,
         "frameworks_detected": frameworks,
         "script_tag_count": len(by.get("script", [])),
         "noscript_words": len(noscript_text.split()),
@@ -88,7 +128,7 @@ def analyse(url):
     h2s = [h["text"] for h in by.get("h2", []) if h["text"]]
     question_headings = [h for h in h1s + h2s + [h["text"] for h in by.get("h3", [])]
                          if h.strip().endswith("?")]
-    imgs = by.get("img", [])
+    imgs = [i for i in by.get("img", []) if not is_decorative(i["attrs"])]
     no_alt = [i["attrs"].get("src", "")[:120] for i in imgs
               if not i["attrs"].get("alt", "").strip()]
     ext_links = []
@@ -100,7 +140,6 @@ def analyse(url):
                 ext_links.append(netloc)
     citations = [d for d in ext_links if not any(s in d for s in SOCIAL)]
     numbers = re.findall(r"(?<![\w/])\d[\d,.]*\s?(?:%|percent|million|billion|bn|k\b|x\b)", text, re.I)
-    path = urllib.parse.urlsplit(url).path.lower()
 
     rec["extract"] = {
         "title": (titles[0] if titles else None),
@@ -123,7 +162,7 @@ def analyse(url):
         "statistic_mentions": len(numbers),
         "statistic_sample": numbers[:6],
         "has_currency_in_text": bool(re.search(CURRENCY, text)),
-        "looks_like_fact_page": any(k in path for k in FACT_PATHS),
+        "looks_like_fact_page": looks_like_fact_page(url, text),
         "heading_ids": [d["attrs"]["id"] for d in A.tags(html, ["h2", "h3"]) if d["attrs"].get("id")][:15],
     }
     return rec
@@ -222,6 +261,39 @@ def _demo():
                      "heading_ids": ["spec"]}},
         {"url": "u3", "status": 404},
     ]
+    # render-gap gate: must fire on a real shell, must NOT fire on SSR ------
+    shell = '<html><body><div id="__next"></div><script src="/_next/static/x.js"></script></body></html>'
+    r_shell = analyse_html("https://x.example/", shell)
+    assert r_shell["render"]["spa_shell_suspected"] is True, r_shell["render"]
+    assert r_shell["render"]["empty_spa_root_ids"] == ["__next"], r_shell["render"]
+
+    # same mount element, but server-rendered prose in descendants (the stripe.com
+    # shape). The tag collector sees no DIRECT text on the root, so only the
+    # whole-page word count separates this from a genuine shell.
+    # Nested divs, so the outer mount has no DIRECT text -- the exact shape that
+    # made stripe.com (1894 server-rendered words) look like an empty shell.
+    body = " ".join(f"<div><p>Sentence number {i} with real content in it.</p></div>"
+                    for i in range(40))
+    ssr = f'<html><body><div id="__next">{body}</div><script src="/_next/static/x.js"></script></body></html>'
+    r_ssr = analyse_html("https://y.example/", ssr)
+    assert r_ssr["render"]["visible_words"] > SHELL_WORD_LIMIT, r_ssr["render"]["visible_words"]
+    assert r_ssr["render"]["spa_shell_suspected"] is False, r_ssr["render"]
+    assert r_ssr["render"]["empty_spa_root_ids"] == [], r_ssr["render"]
+    assert r_ssr["render"]["mount_elements_seen"] == ["__next"], r_ssr["render"]
+
+    # FP regressions -------------------------------------------------------
+    assert not looks_like_fact_page("https://news.ycombinator.com/item?id=1", "a comment thread")
+    assert looks_like_fact_page("https://x.example/pricing", "Plans from $9 per month")
+    assert not looks_like_fact_page("https://x.example/blog/our-pricing-philosophy",
+                                    "thoughts on per month billing")
+    assert is_decorative({"src": "/s.gif", "width": "1", "height": "1"})
+    assert is_decorative({"src": "/x.png", "role": "presentation"})
+    assert not is_decorative({"src": "/shoe.jpg", "width": "600"})
+    assert "angular" not in [n for n, p in FRAMEWORK_HINTS
+                             if re.search(p, '<script src="/polyfills-42372ed.js">', re.I)]
+    assert "angular" in [n for n, p in FRAMEWORK_HINTS
+                         if re.search(p, '<html ng-version="17">', re.I)]
+
     s = summarise(pages)
     assert s["pages_analysed"] == 2 and s["pages_failed"] == 1, s
     assert s["pages_under_120_words"] == ["u1"], s
