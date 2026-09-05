@@ -1,0 +1,30 @@
+{
+  "name": "brand-ai-readiness-audit",
+  "version": "1.0.0",
+  "description": "Audit any website for the problems that stop AI assistants finding, trusting and citing it, and that stop AI-referred visitors engaging once they arrive. Emits one report: findings with evidence and severity, prioritized fixes, proactive recommendations, and a plan for measuring whether the fixes worked.",
+  "license": "MIT",
+  "entrypoint": "audit-orchestrator",
+  "skills": [
+    {
+      "id": "audit-orchestrator",
+      "path": "skills/audit-orchestrator",
+      "entrypoint": true,
+      "summary": "Receives the audit request, runs the other three skills in funnel order, applies the 38-rule catalog and the evidence gate, derives severity, and emits the single audit report."
+    },
+    {
+      "id": "crawl-render-audit",
+      "path": "skills/crawl-render-audit",
+      "summary": "Funnel stages 2-4 (accessible, renderable, extractable). Per-crawler robots.txt and edge-block detection, sitemap and llms.txt, JavaScript render gap, facts locked in non-text."
+    },
+    {
+      "id": "freshness-corroboration",
+      "path": "skills/freshness-corroboration",
+      "summary": "Funnel stages 5-6 (extractable, corroborated). Structured data validity and completeness, entity identity and disambiguation, date signals and their contradictions, on-site corroboration."
+    },
+    {
+      "id": "engagement-audit",
+      "path": "skills/engagement-audit",
+      "summary": "Funnel stage 8 (retained). Answer-continuity: deep-linkability, hop distance to the promised fact, landing-page orientation, first-paint blockers, self-rescue affordances."
+    }
+  ]
+}
