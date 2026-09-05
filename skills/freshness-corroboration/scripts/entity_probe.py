@@ -52,6 +52,11 @@ DATE_RE = re.compile(
     r"|\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?,?\s+20\d{2})\b", re.I)
 COPYRIGHT_RE = re.compile(r"(?:©|&copy;|copyright)\s*(?:\d{4}\s*[-–—]\s*)?(\d{4})", re.I)
 
+# The only two places a site DECLARES its own identity. A disagreement between
+# these is a real naming inconsistency; a <title> segment disagreeing with them
+# is just a page name, and must never be counted as a competing brand.
+DECLARED_NAME_KEYS = ("jsonld", "og_site_name")
+
 
 def year_of(value):
     m = re.search(r"(20\d{2}|19\d{2})", str(value))
@@ -86,12 +91,17 @@ def scan_page(url):
                 names.setdefault("jsonld", o["name"].strip())
     if meta.get("og:site_name"):
         names["og_site_name"] = meta["og:site_name"].strip()
+    # Which title segment is the brand? NOT a fixed position -- sites write both
+    # "Brand | Page" (stripe.com) and "Page | Brand". Taking the tail of every
+    # title turns ordinary page names into invented "brand variants". The brand
+    # is the segment that RECURS across pages, so collect every segment here and
+    # let summarise() decide by frequency.
+    title_segments = []
     if titles:
-        parts = re.split(r"\s[|\-–—]\s", titles[0])
+        parts = re.split(r"\s[|\-–—·:]\s", titles[0])
         # No delimiter means the title is a sentence, not "Page | Brand".
-        # Treating the whole sentence as a brand name invents false variants.
-        if len(parts) > 1 and parts[-1].strip():
-            names["title_tail"] = parts[-1].strip()
+        if len(parts) > 1:
+            title_segments = [s.strip() for s in parts if s.strip()]
     cm = COPYRIGHT_RE.search(text)
     if cm:
         names["copyright_year"] = cm.group(1)
@@ -119,6 +129,7 @@ def scan_page(url):
         "microdata_itemtype": len(re.findall(r"itemtype\s*=", html, re.I)),
         "rdfa_typeof": len(re.findall(r"\btypeof\s*=", html, re.I)),
         "names": names,
+        "title_segments": title_segments,
         "same_as": sorted(set(sameas)),
         "authority_links": sorted({h for h in AUTHORITY_HOSTS
                                    for a in A.tags(html, ["a"])
@@ -174,6 +185,24 @@ def summarise(pages, sameas_results, this_year):
         for k, v in p["names"].items():
             if k != "copyright_year" and v:
                 names_seen.setdefault(k, set()).add(v)
+    # A <title> segment is a PAGE name, not a brand name. "Stripe Billing",
+    # "Services Terms" and "Pricing" all recur across a perfectly consistent
+    # site; promoting them to brand variants is how a site that names itself
+    # correctly everywhere gets accused of naming itself inconsistently.
+    # So titles never create a variant. Only the two places a site actually
+    # DECLARES its identity can contradict each other, and only their
+    # disagreement is a real, actionable finding.
+    seg_pages, titled = {}, 0
+    for p in ok:
+        segs = {s for s in (p.get("title_segments") or []) if s}
+        if segs:
+            titled += 1
+        for s in segs:
+            seg_pages.setdefault(s, set()).add(p["url"])
+    recurring = sorted({s for s, urls in seg_pages.items()
+                        if titled >= 2 and len(urls) >= 2 and len(urls) / titled >= 0.4})
+    declared = {v for k, vs in names_seen.items()
+                if k in DECLARED_NAME_KEYS for v in vs}
     same_as = sorted({s for p in ok for s in p["same_as"]})
     auth = sorted({a for p in ok for a in p["authority_links"]})
     copy_years = sorted({int(p["dates"]["copyright_year"]) for p in ok
@@ -206,7 +235,11 @@ def summarise(pages, sameas_results, this_year):
         "has_breadcrumbs": "BreadcrumbList" in all_types,
         "has_faq": "FAQPage" in all_types,
         "name_variants": {k: sorted(v) for k, v in names_seen.items()},
-        "name_variant_count": len({v for vs in names_seen.values() for v in vs}),
+        # Counts DECLARED names only -- see DECLARED_NAME_KEYS. Recurring title
+        # segments are reported beside it as context, never folded into it.
+        "name_variant_count": len(declared),
+        "declared_names": sorted(declared),
+        "title_recurring_segments": recurring,
         "same_as_declared": same_as,
         "same_as_count": len(same_as),
         "authority_links_found": auth,
