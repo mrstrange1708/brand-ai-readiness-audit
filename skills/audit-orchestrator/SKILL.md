@@ -15,7 +15,7 @@ description: >-
   bouncing in AI apps. Recommend-only; never modifies the audited site.
 license: MIT
 compatibility: Requires Python 3.9+ (standard library only) and outbound HTTPS access. Runs read-only.
-allowed-tools: Bash Read Write
+allowed-tools: Bash(python3:*) Bash(mkdir:*) Read Write
 ---
 
 # Brand AI-Readiness Audit — entrypoint
