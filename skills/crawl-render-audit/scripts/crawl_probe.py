@@ -11,6 +11,7 @@ invisible unless you actually fetch as the bot -- which is what --ua-probe does.
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -67,7 +68,13 @@ def sitemap_urls(base, sitemap_hints, budget=3):
         rec = {"url": sm, "status": r["status"], "bytes": r["bytes"], "error": r["error"]}
         body = r["body"]
         if r["status"] == 200 and body:
-            locs = re.findall(r"<loc>\s*(.*?)\s*</loc>", body, re.I | re.S)
+            # The spec says <loc> is absolute; real sitemaps ship relative
+            # paths and XML-escaped ampersands anyway. Resolve against the
+            # sitemap's own URL and keep only http(s), because an unresolved
+            # path only fails much later, inside a different probe.
+            locs = [urllib.parse.urljoin(sm, html.unescape(x)) for x in
+                    re.findall(r"<loc>\s*(.*?)\s*</loc>", body, re.I | re.S)]
+            locs = [u for u in locs if u.startswith(("http://", "https://"))]
             lastmods += len(re.findall(r"<lastmod>", body, re.I))
             rec["loc_count"] = len(locs)
             rec["is_index"] = "<sitemapindex" in body[:2000].lower()
@@ -256,6 +263,19 @@ Disallow: /
     assert d["edge_blocked_citation"] == ["OAI-SearchBot"], d
     assert d["robots_disallowed_training"] == ["GPTBot"], d
     assert d["edge_blocked_training"] == [] and d["robots_disallowed_citation"] == [], d
+
+    # A relative <loc> must be absolutised here, not blow up two probes later.
+    body = ("<urlset><url><loc>/a/b</loc></url>"
+            "<url><loc>https://x.test/c?d=1&amp;e=2</loc></url>"
+            "<url><loc>ftp://x.test/skip</loc></url></urlset>")
+    locs = [urllib.parse.urljoin("https://x.test/sitemap.xml", html.unescape(u))
+            for u in re.findall(r"<loc>\s*(.*?)\s*</loc>", body, re.I | re.S)]
+    locs = [u for u in locs if u.startswith(("http://", "https://"))]
+    assert locs == ["https://x.test/a/b", "https://x.test/c?d=1&e=2"], locs
+
+    # fetch() promises it never raises. A malformed URL must come back as data.
+    bad = A.fetch("/relative/path")
+    assert bad["error"] and bad["status"] is None, bad
     print("crawl_probe self-check OK")
 
 

@@ -891,6 +891,14 @@ def compose(ev, site, entry):
             gate_rejects.append({"id": r["id"], "reason": "no quotable evidence artifact"})
             continue
         sev = bump(r["base"], hit.get("shift", 0))
+        # `critical` means the page effectively does not exist for a machine:
+        # refused at the door, or fetched and empty. Only those two stages can
+        # reach it. A later-stage problem can be site-wide and still not be that
+        # kind of emergency -- letting blast radius escalate it there puts "no
+        # dates anywhere" beside "the crawler is blocked" and flattens the very
+        # distinction the funnel exists to draw.
+        if sev == "critical" and r["stage"] not in ("accessible", "renderable"):
+            sev = "high"
         findings.append({
             "id": r["id"],
             "title": r["title"],
@@ -1094,6 +1102,12 @@ def _demo():
     assert ids["F-RND-001"]["severity"] == "critical", ids["F-RND-001"]
     # F-RND-002 must not double-report the same pages as F-RND-001
     assert "F-RND-002" not in ids, "thin-text rule double-counted the SPA-shell pages"
+
+    # the critical cap: only accessible/renderable may reach critical, however
+    # site-wide a later-stage problem is. `critical` must keep one meaning.
+    for f in rep["findings"]:
+        if f["severity"] == "critical":
+            assert f["funnel_stage"] in ("accessible", "renderable"), f
 
     # evidence gate: every emitted finding carries a quotable artifact
     for f in rep["findings"]:

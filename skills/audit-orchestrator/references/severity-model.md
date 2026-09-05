@@ -35,6 +35,18 @@ Measured as *affected pages ÷ pages sampled*.
 If fewer than 3 pages were sampled, skip step 2 entirely and keep the base. A
 ratio computed from two pages is noise wearing a number's clothes.
 
+### The critical cap
+
+Escalation can never push a finding past **high** unless its stage is
+`accessible` or `renderable`. `critical` has one meaning — *the page effectively
+does not exist for a machine*, because it was refused at the door or arrived
+empty — and only those two stages can cause that.
+
+Without the cap, blast radius alone promotes any site-wide problem: "no date
+signal on 6/6 pages" would rank beside "the citation crawler is blocked". Both
+are worth fixing; only one makes the site invisible. A reader who sees four
+criticals learns nothing about which to fix first, so the cap protects the word.
+
 ## Step 3 — blocked_by
 
 Any finding at `renderable` or later is tagged `blocked_by` when a **critical
