@@ -174,19 +174,21 @@ def _throttle(url):
 def fetch(url, ua="browser", timeout=DEFAULT_TIMEOUT, max_bytes=3_000_000, method="GET"):
     """Fetch a URL as a named agent. Never raises -- errors come back as data."""
     ua_string = UAS.get(ua, (None, ua))[1]
-    _throttle(url)
-    req = urllib.request.Request(url, method=method, headers={
-        "User-Agent": ua_string,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip",
-    })
     out = {"url": url, "ua": ua, "ua_string": ua_string, "status": None, "final_url": url,
            "headers": {}, "body": "", "bytes": 0, "elapsed_ms": None, "error": None}
-    ctx = ssl_context()
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+        # Request() raises on a relative or malformed URL, so it belongs inside
+        # the guard. Sitemaps in the wild really do contain relative <loc>
+        # values; one of them must cost a single error record, never the probe.
+        _throttle(url)
+        req = urllib.request.Request(url, method=method, headers={
+            "User-Agent": ua_string,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip",
+        })
+        with urllib.request.urlopen(req, timeout=timeout, context=ssl_context()) as resp:
             raw = resp.read(max_bytes)
             out["status"] = resp.status
             out["final_url"] = resp.url
