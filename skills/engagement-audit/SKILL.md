@@ -12,7 +12,7 @@ description: >-
   with, or as the engagement half of an AI-readiness audit. Read-only.
 license: MIT
 compatibility: Requires Python 3.9+ (standard library only) and outbound HTTPS access.
-allowed-tools: Bash Read Write
+allowed-tools: Bash(python3:*) Read Write
 ---
 
 # Engagement & Answer-Continuity Audit

@@ -12,7 +12,7 @@ description: >-
   Read-only; never modifies a site.
 license: MIT
 compatibility: Requires Python 3.9+ (standard library only) and outbound HTTPS access.
-allowed-tools: Bash Read Write
+allowed-tools: Bash(python3:*) Read Write
 ---
 
 # Freshness & Corroboration Audit
