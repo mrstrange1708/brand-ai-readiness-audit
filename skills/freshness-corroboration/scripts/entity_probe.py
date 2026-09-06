@@ -269,6 +269,8 @@ def main():
     ap.add_argument("--limit", type=int, default=12)
     ap.add_argument("--no-sameas-check", action="store_true",
                     help="skip verifying declared sameAs targets resolve")
+    ap.add_argument("--budget-seconds", type=float, default=90,
+                    help="soft wall-clock budget for the per-page sweep (default 90)")
     args = ap.parse_args()
 
     urls, site = list(args.urls), None
@@ -287,14 +289,27 @@ def main():
     ordered = ordered[: args.limit]
 
     started = time.monotonic()
-    pages = [scan_page(u) for u in ordered]
+    deadline = A.Deadline(args.budget_seconds)
+    pages, skipped = [], []
+    for u in ordered:
+        if deadline.expired():
+            skipped.append(u)
+            continue
+        pages.append(scan_page(u))
     declared = sorted({s for p in pages for s in p.get("same_as", [])})
-    sameas_results = [] if args.no_sameas_check else check_sameas(declared)
+    # The sameAs check is its own small, separately-bounded (limit=6) fetch
+    # burst -- skip it too once the budget is already spent rather than
+    # spending more on top of a sweep that was itself cut short.
+    sameas_results = ([] if args.no_sameas_check or deadline.expired()
+                      else check_sameas(declared))
     ev = {"site": site or urllib.parse.urlsplit(ordered[0]).netloc,
           "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
           "probe": "entity_probe",
           "summary": summarise(pages, sameas_results, datetime.now(timezone.utc).year),
           "pages": pages,
+          "budget_seconds": args.budget_seconds,
+          "budget_exceeded": bool(skipped),
+          "skipped_by_budget": skipped,
           "elapsed_ms": int((time.monotonic() - started) * 1000)}
     A.emit(ev)
     if args.out:

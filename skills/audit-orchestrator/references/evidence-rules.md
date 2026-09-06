@@ -21,7 +21,7 @@ Not artifacts: "the site seems slow", "content feels thin", "the brand is not
 well known", "competitors do this better". Those are opinions. If the probes did
 not measure it, the audit does not claim it.
 
-## Applying it during step 6 of the entrypoint procedure
+## Applying it during step 5 of the entrypoint procedure
 
 For every finding, open the evidence file it came from and confirm the artifact
 exists and says what the finding says. Then choose:

@@ -209,6 +209,8 @@ def main():
     ap.add_argument("--from", dest="src", help="crawl_probe.py JSON; uses its page_shortlist")
     ap.add_argument("--out", help="also write JSON evidence here")
     ap.add_argument("--limit", type=int, default=12)
+    ap.add_argument("--budget-seconds", type=float, default=90,
+                    help="soft wall-clock budget for the per-page sweep (default 90)")
     args = ap.parse_args()
 
     urls = list(args.urls)
@@ -228,12 +230,21 @@ def main():
     ordered = ordered[: args.limit]
 
     started = time.monotonic()
-    pages = [analyse(u) for u in ordered]
+    deadline = A.Deadline(args.budget_seconds)
+    pages, skipped = [], []
+    for u in ordered:
+        if deadline.expired():
+            skipped.append(u)
+            continue
+        pages.append(analyse(u))
     ev = {"site": site or urllib.parse.urlsplit(ordered[0]).netloc,
           "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
           "probe": "render_probe",
           "summary": summarise(pages),
           "pages": pages,
+          "budget_seconds": args.budget_seconds,
+          "budget_exceeded": bool(skipped),
+          "skipped_by_budget": skipped,
           "elapsed_ms": int((time.monotonic() - started) * 1000)}
     A.emit(ev)
     if args.out:
@@ -280,6 +291,15 @@ def _demo():
     assert r_ssr["render"]["spa_shell_suspected"] is False, r_ssr["render"]
     assert r_ssr["render"]["empty_spa_root_ids"] == [], r_ssr["render"]
     assert r_ssr["render"]["mount_elements_seen"] == ["__next"], r_ssr["render"]
+
+    # A bare attribute (<img alt>, no ="value") is real HTML that HTMLParser
+    # reports as (name, None). It crashed every probe that reached
+    # .get("alt", "").strip() on Wikipedia, Netlify, Fastmail and others in a
+    # 38-site sweep -- a single such image took down the whole render probe.
+    bare = ('<html><body><img src="/a.png" alt><img src="/b.png"><input disabled>'
+            '<div id="root"></div></body></html>')
+    r_bare = analyse_html("https://z.example/", bare)
+    assert r_bare["extract"]["images_without_alt"] == 2, r_bare["extract"]
 
     # FP regressions -------------------------------------------------------
     assert not looks_like_fact_page("https://news.ycombinator.com/item?id=1", "a comment thread")

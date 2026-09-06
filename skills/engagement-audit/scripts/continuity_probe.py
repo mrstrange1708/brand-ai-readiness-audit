@@ -88,11 +88,13 @@ def page_facts(url, html, text):
     }
 
 
-def walk(base, max_pages, max_depth):
+def walk(base, max_pages, max_depth, deadline=None):
     """Bounded BFS from the entry point. Records the hop count at which a hard fact
     first becomes readable -- the visitor's real distance to the answer."""
     seen, queue, pages = {base}, [(base, 0)], []
     while queue and len(pages) < max_pages:
+        if deadline and deadline.expired():
+            break
         url, depth = queue.pop(0)
         r = A.fetch(url)
         if r["status"] != 200 or not r["body"]:
@@ -154,6 +156,8 @@ def main():
     ap.add_argument("--out")
     ap.add_argument("--max-pages", type=int, default=12)
     ap.add_argument("--max-depth", type=int, default=2)
+    ap.add_argument("--budget-seconds", type=float, default=90,
+                    help="soft wall-clock budget for the BFS walk (default 90)")
     args = ap.parse_args()
 
     site = None
@@ -167,13 +171,16 @@ def main():
         ap.error("pass a target or --from evidence/crawl.json")
 
     started = time.monotonic()
-    pages = walk(base, args.max_pages, args.max_depth)
+    deadline = A.Deadline(args.budget_seconds)
+    pages = walk(base, args.max_pages, args.max_depth, deadline=deadline)
     ev = {"site": site or urllib.parse.urlsplit(base).netloc,
           "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
           "probe": "continuity_probe",
           "entry_url": base,
           "summary": summarise(pages),
           "pages": pages,
+          "budget_seconds": args.budget_seconds,
+          "budget_exceeded": deadline.expired(),
           "elapsed_ms": int((time.monotonic() - started) * 1000)}
     A.emit(ev)
     if args.out:

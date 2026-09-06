@@ -24,6 +24,7 @@ import sys
 from datetime import datetime, timezone
 
 SEV_ORDER = ["critical", "high", "medium", "low", "info"]
+BOT_BLOCK_STATUSES = {401, 403, 405, 406, 429, 451, 503, 999}
 
 # Funnel stages, in the order a page must pass them. A break at an earlier stage
 # makes every later stage moot -- that ordering is the whole point.
@@ -217,6 +218,18 @@ def build_rules():
     def _(ev):
         hp = ev.get("crawl", {}).get("homepage", {})
         if not hp or (hp.get("status") == 200 and not hp.get("error")):
+            return None
+        # The homepage check is one fetch under one synthetic UA string. A WAF
+        # that individually challenges that exact request (while allowlisting
+        # recognised crawlers) can fail it even though citation-family
+        # crawlers -- the ones this finding's own rationale is about -- reached
+        # the identical URL and got 200; ua_probe, gathered in the same run, is
+        # the proof (corroborated_by is citation-family only: a training bot
+        # succeeding does not establish citability). Reporting "the site is
+        # down" against that evidence in the same file would be a false
+        # critical of the worst kind: it also suppresses every other finding.
+        corroborators = hp.get("corroborated_by") or []
+        if corroborators:
             return None
         return {"evidence": f"GET {ev['crawl']['base_url']} returned "
                             f"{hp.get('error') or 'HTTP ' + str(hp.get('status'))}.",
@@ -915,6 +928,27 @@ def compose(ev, site, entry):
             },
         })
 
+    # A WAF that flagged this audit's own plain-fetch request (proven by
+    # corroborated_by on the homepage: other UAs reached the SAME url and got
+    # 200) plausibly flagged the identical UA on /sitemap.xml and /llms.txt
+    # too. Those findings still stand -- the literal fetch really did fail --
+    # but asserting the resource is absent at full confidence, in a report
+    # that elsewhere shows this exact site's crawler access is fine, would be
+    # inconsistent and overconfident. Downgrade and say why, rather than
+    # silently drop -- we have no bot-UA evidence for these specific paths.
+    hp = ev.get("crawl", {}).get("homepage", {})
+    raw_status = hp.get("status")
+    if hp.get("corroborated_by") and raw_status in BOT_BLOCK_STATUSES:
+        for f in findings:
+            if f["id"] in ("F-ACC-005", "F-ACC-007") and str(raw_status) in f["evidence"]:
+                f["confidence"] = "medium"
+                f["evidence"] += (
+                    f" This audit's own homepage fetch got the same HTTP {raw_status} while "
+                    f"{len(hp['corroborated_by'])} named crawler UA(s) reached the homepage "
+                    f"successfully ({', '.join(hp['corroborated_by'][:3])}) -- this site's WAF may be "
+                    f"blocking the audit's request specifically, not the resource. Confirm with a "
+                    f"verified-bot fetch before treating this as genuinely absent.")
+
     # Findings behind a hard access block are noise until the door opens.
     blockers = [f for f in findings
                 if f["funnel_stage"] == "accessible" and f["severity"] == "critical"]
@@ -1114,6 +1148,41 @@ def _demo():
         assert len(f["evidence"]) >= 20 and f["suggested_action"]["how"], f
     assert rep["summary"]["total_findings"] == len(rep["findings"])
     assert "accessible" in rep["summary"]["stages_broken"]
+
+    # Corroborated non-200: a WAF challenges this audit's own request while
+    # every named crawler reaches the identical URL. Reproduced live on
+    # w3.org and patagonia.com in a 38-site sweep -- a real ~5% incidence, not
+    # a hypothetical. F-ACC-009 must not fire, nothing must be blocked_by it,
+    # and F-ACC-005/007 must still stand but at downgraded confidence with the
+    # discrepancy stated, since we have no bot-UA evidence for those paths.
+    ev_corr = {
+        "crawl": {"site": "w.example", "base_url": "https://w.example/",
+                  "robots": {"url": "https://w.example/robots.txt", "declares_sitemap": False,
+                             "blanket_disallow_all": False},
+                  "llms_txt": {"url": "https://w.example/llms.txt", "status": 403, "present": False},
+                  "homepage": {"status": 403, "https": True, "final_url": "https://w.example/",
+                              "corroborated_by": ["ClaudeBot", "GPTBot", "OAI-SearchBot"]},
+                  "sitemap": {"url_count": 0, "documents": [{"url": "https://w.example/sitemap.xml",
+                                                             "status": 403}]},
+                  "access": {"control_status": 403, "robots_disallowed_citation": [], "edge_blocked": []}},
+    }
+    rep_corr = compose(ev_corr, "w.example", "https://w.example/")
+    ids_corr = {f["id"]: f for f in rep_corr["findings"]}
+    assert "F-ACC-009" not in ids_corr, ids_corr
+    assert not any(f.get("blocked_by") for f in rep_corr["findings"]), rep_corr["findings"]
+    assert ids_corr["F-ACC-005"]["confidence"] == "medium", ids_corr["F-ACC-005"]
+    assert "ClaudeBot" in ids_corr["F-ACC-005"]["evidence"], ids_corr["F-ACC-005"]
+    assert ids_corr["F-ACC-007"]["confidence"] == "medium", ids_corr["F-ACC-007"]
+
+    # Same shape, but nothing corroborates it (a real outage) -- must still
+    # fire critical and still gate everything downstream. The fix must not
+    # weaken detection of a genuinely unreachable site.
+    ev_down = json.loads(json.dumps(ev_corr))
+    ev_down["crawl"]["homepage"]["corroborated_by"] = []
+    rep_down = compose(ev_down, "w.example", "https://w.example/")
+    ids_down = {f["id"]: f for f in rep_down["findings"]}
+    assert ids_down["F-ACC-009"]["severity"] == "critical", ids_down["F-ACC-009"]
+    assert ids_down["F-ACC-005"]["confidence"] == "high", ids_down["F-ACC-005"]
 
     # a rule that raises must be caught, not crash the audit
     bad = compose({"crawl": {"access": None}}, "y.example", "")
