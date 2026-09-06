@@ -18,7 +18,7 @@ Ids are stable. `F-ACC` access, `F-RND` render/extract, `F-ENT` entity/freshness
 | F-ACC-004 | Training crawlers blocked | Removes the brand from model memory. Legitimate as policy; reported so it is a decision, not an accident |
 | F-ACC-005 | No reachable XML sitemap | Crawlers fall back to link-following, so deep and orphaned pages may never be found |
 | F-ACC-006 | Sitemap has no `<lastmod>` | Nothing tells a crawler the page changed, so re-crawl waits on its own schedule and fresh facts sit unread |
-| F-ACC-007 | No `llms.txt` | No curated map of the quotable pages; the crawler guesses which pages matter |
+| F-ACC-007 | No `llms.txt` | A curated map of the quotable pages — **but consumption is unproven**: no major vendor primary doc confirms production use, adoption is ~6–10%. Kept at `low` and worded as a cheap optional bet, never as an established mechanism. This is the one rule in the catalog whose mechanism is *not* measured, and it says so |
 | F-ACC-008 | Homepage not HTTPS | Downranked and often refused outright |
 | F-ACC-009 | Homepage not 200 | Nothing downstream is measurable |
 

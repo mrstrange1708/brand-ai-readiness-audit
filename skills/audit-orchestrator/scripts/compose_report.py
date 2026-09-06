@@ -181,11 +181,19 @@ def build_rules():
                 "where": [d.get("url") for d in sm.get("documents", []) if d.get("url")]}
 
     @rule("F-ACC-007", "No llms.txt is published", "discovered", "low",
-          "Publish /llms.txt pointing at the canonical, quotable pages.",
-          ["Plain markdown: an H1 with the brand name, a one-line description, then linked sections "
-           "(Products, Pricing, Docs, About, Press) with one line of context per link.",
+          "Optional, low-cost: publish /llms.txt pointing at the canonical, quotable pages.",
+          ["Adoption caveat, stated plainly because it changes whether this is worth your time: "
+           "no major AI vendor has a primary doc confirming production use of llms.txt for "
+           "retrieval or citation, and reported adoption sits around 6-10% of sites. Treat this "
+           "as a cheap, harmless bet, NOT as an established ranking or citation mechanism -- and "
+           "never at the expense of the fixes above it, which rest on measured behaviour.",
+           "If you publish it: plain markdown, an H1 with the brand name, a one-line description, "
+           "then linked sections (Products, Pricing, Docs, About, Press), one line of context per "
+           "link.",
            "Point it at the pages that state hard facts, not at marketing landing pages.",
-           "Keep it in sync with the sitemap; a stale llms.txt is worse than none."],
+           "Keep it in sync with the sitemap; a stale llms.txt is worse than none.",
+           "The durable version of this idea is a real sitemap with accurate <lastmod> plus "
+           "genuinely quotable pages -- those are consumed by crawlers today, demonstrably."],
           "crawl_probe.py: llms_txt.present is true.",
           "crawl")
     def _(ev):

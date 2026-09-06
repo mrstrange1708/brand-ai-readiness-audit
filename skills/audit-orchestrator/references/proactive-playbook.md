@@ -70,9 +70,15 @@ Stable `id`s on fact-bearing headings, never renamed in a redesign. Once
 assistants start citing `/product#specs`, that anchor is an address other people
 depend on. Treat it like an API.
 
-**9. Publish `llms.txt` and keep it honest.**
+**9. `llms.txt` — a cheap bet, and say so.**
 Point it at the canonical fact pages, not the marketing funnel. A stale
 `llms.txt` is worse than none.
+*Say the quiet part out loud when you recommend this:* no major AI vendor has
+a primary doc confirming production use for retrieval or citation, and adoption
+is roughly 6–10% of sites. It costs an hour and might pay off. Recommend it as
+that, never as an established mechanism, and never ahead of a fix that rests on
+measured behaviour. A recommendation that oversells its own evidence spends
+credibility you need for the ones that are real.
 
 **10. Use the context that does arrive.**
 The site cannot see the assistant's conversation, but referrer, UTM parameters,
