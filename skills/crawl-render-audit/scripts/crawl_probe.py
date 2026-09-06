@@ -93,11 +93,38 @@ def sitemap_urls(base, sitemap_hints, budget=3):
             "sample": uniq[:20]}, uniq
 
 
-def probe_user_agents(url, robots_text):
-    """Fetch the same URL as every crawler family. This is the CDN-block detector."""
+_UA_PROBE_TRIP_AFTER = 2  # consecutive transport-level failures on this SAME url
+
+
+def probe_user_agents(url, robots_text, deadline=None):
+    """Fetch the same URL as every crawler family. This is the CDN-block detector.
+
+    Circuit breaker: if the last _UA_PROBE_TRIP_AFTER fetches of this exact URL
+    each failed at the transport level (no HTTP status at all -- a real DNS/TLS/
+    reset/timeout, not a 403 or 404), further identical requests are skipped
+    rather than each paying a full timeout. Seen live on gnu.org: 14 sequential
+    per-UA fetches of one dead connection cost ~140s of a ~180s crawl_probe run.
+    Scoped to fetches of THIS url only, not the host in general -- a robots.txt
+    or llms.txt 404 elsewhere must never suppress this sweep, which is the
+    marketplace's core training-vs-citation signal.
+    """
     rows = []
+    consecutive_transport_failures = 0
     for ua in ["browser", "Googlebot"] + A.CITATION_BOTS + A.TRAINING_BOTS:
+        if consecutive_transport_failures >= _UA_PROBE_TRIP_AFTER or (deadline and deadline.expired()):
+            reason = ("deadline" if (deadline and deadline.expired()) else "transport")
+            rows.append({"ua": ua, "family": A.UAS[ua][0], "status": None, "bytes": 0,
+                        "error": (f"skipped: soft time budget spent probing this site -- a slow "
+                                  f"but alive origin, not a code fault." if reason == "deadline" else
+                                  f"skipped: the last {_UA_PROBE_TRIP_AFTER} fetches of this url "
+                                  f"failed at the transport level, so further identical requests "
+                                  f"would only add latency, not information."),
+                        "elapsed_ms": 0, "robots_allows": A.robots_allows(robots_text, ua, url),
+                        "server": None, "x_robots_tag": None, "cf_mitigated": None})
+            continue
         r = A.fetch(url, ua=ua)
+        consecutive_transport_failures = (
+            consecutive_transport_failures + 1 if (r["error"] and r["status"] is None) else 0)
         rows.append({
             "ua": ua,
             "family": A.UAS[ua][0],
@@ -141,10 +168,13 @@ def main():
     ap.add_argument("--out", help="also write JSON evidence here")
     ap.add_argument("--pages", type=int, default=10, help="how many page URLs to shortlist (default 10)")
     ap.add_argument("--no-ua-probe", action="store_true", help="skip the per-crawler fetch")
+    ap.add_argument("--budget-seconds", type=float, default=90,
+                    help="soft wall-clock budget for the per-crawler sweep (default 90)")
     args = ap.parse_args()
 
     base = A.norm_base(args.target)
     started = time.monotonic()
+    deadline = A.Deadline(args.budget_seconds)
     ev = {"site": urllib.parse.urlsplit(base).netloc,
           "base_url": base,
           "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -191,9 +221,27 @@ def main():
 
     # -- per-crawler access probe -------------------------------------------
     if not args.no_ua_probe:
-        rows = probe_user_agents(base, robots_text)
+        rows = probe_user_agents(base, robots_text, deadline=deadline)
         ev["ua_probe"] = rows
         ev["access"] = derive_access(rows)
+        # The homepage fetch above used one synthetic UA string. Some WAFs
+        # individually challenge that exact request shape while allowlisting
+        # recognised crawlers by verified signature -- so a non-200 there is
+        # not proof the page is down if the crawlers this audit is actually
+        # about reached the identical URL, moments apart, and got 200. Without
+        # this, a single flaky/challenged request manufactures a "site is
+        # unreachable" critical that the rest of this same evidence file
+        # directly contradicts.
+        #
+        # Deliberately CITATION family only, not "any UA". Seen live: one
+        # training bot (Google-Extended) got 200 from patagonia.com while
+        # EVERY citation bot got 404 from a different backend entirely
+        # (Akamai, 10 bytes -- not the real site). That is a genuine, different
+        # defect -- citation crawlers dead-ended -- not evidence the site is
+        # fine. Only a citation-family success answers the question this audit
+        # exists to ask: can this site ever be cited.
+        ev["homepage"]["corroborated_by"] = sorted({
+            r["ua"] for r in rows if r["family"] == "citation" and r["status"] == 200})
 
     # -- shortlist pages for the downstream probes ---------------------------
     candidates = list(sm_urls)
@@ -226,6 +274,8 @@ def main():
     ev["page_shortlist"] = shortlist[: args.pages]
     ev["discovered_url_count"] = len(set(candidates))
     ev["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    ev["budget_seconds"] = args.budget_seconds
+    ev["budget_exceeded"] = deadline.expired()
 
     A.emit(ev)
     if args.out:
@@ -276,6 +326,67 @@ Disallow: /
     # fetch() promises it never raises. A malformed URL must come back as data.
     bad = A.fetch("/relative/path")
     assert bad["error"] and bad["status"] is None, bad
+
+    # corroborated_by must require CITATION family specifically. Seen live on
+    # patagonia.com: one training bot (Google-Extended) got 200 while every
+    # citation bot got 404 from a different backend -- that must NOT read as
+    # "corroborated", or a real citation dead-end gets reported as fine.
+    rows_train_only = [
+        {"ua": "browser", "family": "control", "status": 403},
+        {"ua": "Google-Extended", "family": "training", "status": 200},
+        {"ua": "OAI-SearchBot", "family": "citation", "status": 404},
+        {"ua": "PerplexityBot", "family": "citation", "status": 404},
+    ]
+    corr = sorted({r["ua"] for r in rows_train_only if r["family"] == "citation" and r["status"] == 200})
+    assert corr == [], corr
+    rows_citation_ok = rows_train_only[:2] + [
+        {"ua": "OAI-SearchBot", "family": "citation", "status": 200},
+        {"ua": "PerplexityBot", "family": "citation", "status": 404},
+    ]
+    corr2 = sorted({r["ua"] for r in rows_citation_ok if r["family"] == "citation" and r["status"] == 200})
+    assert corr2 == ["OAI-SearchBot"], corr2
+
+    # Circuit breaker: a dead connection must stop burning a full timeout per
+    # remaining UA, but must never fire on ordinary HTTP error responses (a
+    # real 403/404 proves the transport works -- only genuine transport-level
+    # failures, status=None, count towards the trip).
+    class _FakeTransportFail(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    def _fake_fetch(url, ua="browser", timeout=12, max_bytes=0, method="GET"):
+        calls["n"] += 1
+        return {"status": None, "bytes": 0, "error": "URLError: connection reset",
+                "elapsed_ms": 1, "headers": {}}
+
+    real_fetch = A.fetch
+    A.fetch = _fake_fetch
+    try:
+        rows_dead = probe_user_agents("https://dead.example/", "")
+    finally:
+        A.fetch = real_fetch
+    assert calls["n"] == _UA_PROBE_TRIP_AFTER, calls
+    assert len(rows_dead) == 2 + len(A.CITATION_BOTS) + len(A.TRAINING_BOTS), len(rows_dead)
+    assert all(r["status"] is None for r in rows_dead), rows_dead
+    assert "skipped" in rows_dead[-1]["error"], rows_dead[-1]
+
+    # A real 404 (transport worked) must never be mistaken for a dead
+    # connection -- status is not None, so the counter must not advance.
+    calls2 = {"n": 0}
+
+    def _fake_fetch_404(url, ua="browser", timeout=12, max_bytes=0, method="GET"):
+        calls2["n"] += 1
+        return {"status": 404, "bytes": 10, "error": None, "elapsed_ms": 50, "headers": {}}
+
+    A.fetch = _fake_fetch_404
+    try:
+        rows_404 = probe_user_agents("https://has-no-robots.example/", "")
+    finally:
+        A.fetch = real_fetch
+    assert calls2["n"] == 2 + len(A.CITATION_BOTS) + len(A.TRAINING_BOTS), calls2
+    assert all(r["status"] == 404 for r in rows_404), rows_404
+
     print("crawl_probe self-check OK")
 
 
