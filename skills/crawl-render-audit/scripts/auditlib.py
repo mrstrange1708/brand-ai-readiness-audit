@@ -67,6 +67,34 @@ def ssl_context():
     return _SSL_CTX
 
 
+class Deadline:
+    """A soft wall-clock budget a probe's main loop checks between whole units
+    of work (pages, UAs, sitemap documents).
+
+    Individual requests already bound themselves via fetch()'s own `timeout`,
+    and the circuit breaker in crawl_probe bounds a dead connection -- but
+    nothing previously bounded a genuinely SLOW-but-alive site, where every
+    request succeeds yet each takes several seconds. Measured live: a single
+    ordinary (non-adversarial) slow/distant site pushed one probe stage past
+    six minutes on its own, well past the 5-minute whole-audit budget, with
+    every individual request completing "successfully" the entire time -- so
+    no per-request timeout or dead-connection breaker could have caught it.
+    This is deliberately soft (checked between items, not preemptive) so a
+    request already in flight always finishes and is never corrupted
+    mid-read; the next item is simply not started once the budget is spent.
+    """
+
+    def __init__(self, seconds):
+        self._deadline = time.monotonic() + seconds
+        self.seconds = seconds
+
+    def expired(self):
+        return time.monotonic() >= self._deadline
+
+    def remaining(self):
+        return max(0.0, self._deadline - time.monotonic())
+
+
 def tls_trust_source():
     """Where the trust store came from. Recorded in every probe's output."""
     ssl_context()
@@ -284,6 +312,16 @@ def visible_text(html):
     return re.sub(r"\s+", " ", " ".join(p.parts)).strip()
 
 
+def _clean_attrs(attrs):
+    """HTMLParser reports a bare attribute (<img alt>, <input disabled>) as a
+    (name, None) pair, not (name, ""). Every caller does .get(k, "").strip() or
+    similar, and default-only-if-missing does not catch a key that is present
+    with value None -- so a single bare attribute on any page crashed the
+    entire probe with AttributeError. Normalise here, once, so no caller has to
+    know this quirk exists."""
+    return {k: ("" if v is None else v) for k, v in attrs}
+
+
 class _Tags(HTMLParser):
     """Collect tags of interest with attributes and inner text."""
 
@@ -297,13 +335,13 @@ class _Tags(HTMLParser):
         if tag not in self.wanted:
             return
         if tag in _VOID_TAGS:
-            self.found.append({"tag": tag, "attrs": dict(attrs), "text": ""})
+            self.found.append({"tag": tag, "attrs": _clean_attrs(attrs), "text": ""})
         else:
-            self._stack.append({"tag": tag, "attrs": dict(attrs), "text": []})
+            self._stack.append({"tag": tag, "attrs": _clean_attrs(attrs), "text": []})
 
     def handle_startendtag(self, tag, attrs):
         if tag in self.wanted:
-            self.found.append({"tag": tag, "attrs": dict(attrs), "text": ""})
+            self.found.append({"tag": tag, "attrs": _clean_attrs(attrs), "text": ""})
 
     def handle_data(self, data):
         if self._stack:
@@ -422,6 +460,27 @@ def _demo():
     assert sum(1 for g in got if g["tag"] == "img" and not g["attrs"].get("alt")) == 1, got
     assert set(CITATION_BOTS) >= {"OAI-SearchBot", "Claude-SearchBot", "PerplexityBot"}
     assert "GPTBot" in TRAINING_BOTS and "GPTBot" not in CITATION_BOTS
+
+    # bare attribute (<img alt>, no ="value") must normalise to "", not None --
+    # this crashed every probe on real pages (Wikipedia, Netlify, Fastmail)
+    # before _clean_attrs existed. A genuinely MISSING attribute (no alt at
+    # all, distinct from a present-but-bare one) correctly stays absent --
+    # every real caller does .get("alt", "").strip(), which only needs the
+    # bare case fixed, not a synthesized default for a key that isn't there.
+    bare = tags('<img src="a.png" alt><img src="b.png">', ["img"])
+    assert [g["attrs"].get("alt", "") for g in bare] == ["", ""], bare
+    assert "alt" in bare[0]["attrs"] and "alt" not in bare[1]["attrs"], bare
+
+    # Deadline: the shared soft wall-clock budget every probe's main loop
+    # checks between items. expired()/remaining() must be monotonic and
+    # correct at both ends -- every probe's early-exit logic reduces to
+    # `if deadline.expired(): skip/break`, so a bug here silently breaks the
+    # runtime-budget protection in all four probes at once.
+    d_ample = Deadline(60)
+    assert not d_ample.expired() and d_ample.remaining() > 50, d_ample.remaining()
+    d_spent = Deadline(0)
+    assert d_spent.expired() and d_spent.remaining() == 0.0
+
     print("auditlib self-check OK")
 
 
