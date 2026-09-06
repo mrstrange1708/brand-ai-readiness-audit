@@ -21,14 +21,18 @@ Then point an agent at the entrypoint skill with a domain. It runs:
 mkdir -p evidence
 S=skills
 python3 $S/crawl-render-audit/scripts/crawl_probe.py       example.com --out evidence/crawl.json --pages 10
-python3 $S/crawl-render-audit/scripts/render_probe.py      --from evidence/crawl.json --out evidence/render.json
-python3 $S/freshness-corroboration/scripts/entity_probe.py --from evidence/crawl.json --out evidence/entity.json
-python3 $S/engagement-audit/scripts/continuity_probe.py    --from evidence/crawl.json --out evidence/engagement.json
+# render, entity and engagement depend only on crawl.json, not on each other --
+# run them concurrently or their per-page fetches add up on a slow site
+python3 $S/crawl-render-audit/scripts/render_probe.py      --from evidence/crawl.json --out evidence/render.json &
+python3 $S/freshness-corroboration/scripts/entity_probe.py --from evidence/crawl.json --out evidence/entity.json &
+python3 $S/engagement-audit/scripts/continuity_probe.py    --from evidence/crawl.json --out evidence/engagement.json &
+wait
 python3 $S/audit-orchestrator/scripts/compose_report.py    --evidence-dir evidence --out report.json --markdown report.md
 ```
 
-Typical run: **20–40 seconds** for a 10-page sample. No `pip install` — Python 3
-standard library only, so it runs on any machine that has Python at all.
+Typical run: **20–90 seconds** for a 10-page sample, depending on how far away
+and how fast the target site is. No `pip install` — Python 3 standard library
+only, so it runs on any machine that has Python at all.
 
 ## The idea
 

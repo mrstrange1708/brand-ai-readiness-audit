@@ -47,32 +47,38 @@ A domain or URL. Optionally `--pages N` (default 10) to widen the sample.
 
 ## Procedure
 
-Deterministic. Steps 1–5 are mechanical; steps 6–8 are where judgment belongs.
+Deterministic. Steps 1–4 are mechanical; steps 5–7 are where judgment belongs.
 
 1. **Set up.** `mkdir -p evidence`. Resolve the target to a scheme + host root.
    Let `S=skills` be the marketplace's skills directory.
 
-2. **Access + render** (`crawl-render-audit`):
+2. **Access** (`crawl-render-audit`):
    ```
-   python3 $S/crawl-render-audit/scripts/crawl_probe.py  <target> --out evidence/crawl.json --pages 10
-   python3 $S/crawl-render-audit/scripts/render_probe.py --from evidence/crawl.json --out evidence/render.json
+   python3 $S/crawl-render-audit/scripts/crawl_probe.py <target> --out evidence/crawl.json --pages 10
    ```
    If `homepage.status` is not 200 and `error` is set, stop and report a single
    critical finding: the site was unreachable. Do not emit downstream findings
    from an empty crawl — absence of evidence is not evidence of absence.
 
-3. **Entity + freshness** (`freshness-corroboration`):
+3. **Render, entity, and engagement — launch these three CONCURRENTLY, not one
+   after another.** Each depends only on `crawl.json`, not on each other, and
+   each fetches several pages over the network. Run in sequence and their costs
+   add; on a slow or geographically distant site that sum can approach the
+   5-minute budget with no margin left for step 4. Measured live on a real,
+   ordinary (not adversarial) site with no special conditions: 62s + 59s + 86s
+   run one after another (207s) becomes 86s run together — the same evidence,
+   for the wall-clock cost of the slowest probe instead of their sum.
    ```
-   python3 $S/freshness-corroboration/scripts/entity_probe.py --from evidence/crawl.json --out evidence/entity.json
+   python3 $S/crawl-render-audit/scripts/render_probe.py      --from evidence/crawl.json --out evidence/render.json &
+   python3 $S/freshness-corroboration/scripts/entity_probe.py --from evidence/crawl.json --out evidence/entity.json &
+   python3 $S/engagement-audit/scripts/continuity_probe.py    --from evidence/crawl.json --out evidence/engagement.json --max-pages 12 &
+   wait
    ```
+   `wait` blocks until all three background jobs finish; check each one's exit
+   status (`$?` per job, or re-run any whose `evidence/*.json` is missing
+   afterward) rather than assuming success.
 
-4. **Engagement** (`engagement-audit`):
-   ```
-   python3 $S/engagement-audit/scripts/continuity_probe.py --from evidence/crawl.json --out evidence/engagement.json --max-pages 12
-   ```
-   Steps 2–4 are independent once `crawl.json` exists and may run concurrently.
-
-5. **Compose.**
+4. **Compose.**
    ```
    python3 $S/audit-orchestrator/scripts/compose_report.py --evidence-dir evidence --out report.json --markdown report.md
    ```
@@ -80,19 +86,19 @@ Deterministic. Steps 1–5 are mechanical; steps 6–8 are where judgment belong
    marks blocked findings, and validates the report against the schema. A
    non-zero exit means the report failed validation — fix it, never ship it.
 
-6. **Verify every finding before you present it.** For each finding, open the
+5. **Verify every finding before you present it.** For each finding, open the
    cited evidence and confirm the artifact exists and says what the finding
    claims. Anything you cannot confirm gets deleted or demoted to
    `proactive_recommendations`. This step is the difference between an audit and
    a guess. See `references/evidence-rules.md`.
 
-7. **Add what only judgment can add.** Populate `proactive_recommendations`
+6. **Add what only judgment can add.** Populate `proactive_recommendations`
    using `references/proactive-playbook.md`. These are improvements where no
    defect was detected — they must be specific to what you actually observed on
    this site, and must state the mechanism, not just the tactic. Drop any that
    the findings already cover.
 
-8. **Add the measurement plan.** Populate `measurement_plan` from
+7. **Add the measurement plan.** Populate `measurement_plan` from
    `references/measurement-protocol.md`: a site-specific query set and the
    metrics to track, so the owner can tell whether the fixes worked. Generate
    the queries from this site's own products, category and locations.
@@ -130,6 +136,7 @@ the first screen and know what to fix on Monday.
 | `robots.txt` blocks the crawl | Honour it. Audit only permitted pages and record what was skipped. |
 | Fewer than 3 pages sampled | Emit the report, but set every blast-radius-derived severity to its base and say the sample was too small to generalize. |
 | A probe crashes | Continue with the others; list the missing probe in `coverage.probes_run`. |
+| Step 3 is approaching the time budget | Confirm the three probes actually ran concurrently (a sequential fallback triples the wall-clock cost). If still slow, it is a genuinely slow origin — let `--max-pages`/`--pages` shrink on the next run rather than raising per-request timeouts. |
 
 ## References
 
